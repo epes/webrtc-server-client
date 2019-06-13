@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/epes/webrtc-server-client/common"
 	webrtc "github.com/pion/webrtc/v2"
@@ -57,10 +58,16 @@ func (c *client) Start() {
 	dataChannel.OnOpen(func() {
 		log.Printf("[%s] data channel '%s' open\n", c.id, dataChannel.Label())
 
-		message := "login"
+		i := 0
 
-		log.Printf("[%s] sending '%s'\n", c.id, message)
-		dataChannel.Send([]byte(message))
+		for {
+			time.Sleep(5 * time.Second)
+			i++
+			message := fmt.Sprintf("message #%d from %s", i, c.id)
+
+			log.Printf("[%s] sending '%s'\n", c.id, message)
+			dataChannel.Send([]byte(message))
+		}
 	})
 
 	dataChannel.OnMessage(func(msg webrtc.DataChannelMessage) {
