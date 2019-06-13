@@ -42,5 +42,6 @@ func s(port int) {
 
 func c(port int, name string, group string) {
 	log.Printf("[client] generating client '%s' connecting to group %s on port %d\n", name, group, port)
-	client.Init(port, name, group)
+	client := client.NewClient(name, group, port)
+	client.Start()
 }

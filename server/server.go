@@ -10,15 +10,15 @@ import (
 	webrtc "github.com/pion/webrtc/v2"
 )
 
-type Server struct {
+type server struct {
 	candidates  map[string]chan *webrtc.ICECandidate
 	connections map[string]*webrtc.PeerConnection
 	fanouts     map[string]*fanout
 	port        int
 }
 
-func NewServer(port int) *Server {
-	return &Server{
+func NewServer(port int) *server {
+	return &server{
 		candidates:  make(map[string]chan *webrtc.ICECandidate),
 		connections: make(map[string]*webrtc.PeerConnection),
 		fanouts:     make(map[string]*fanout),
@@ -26,7 +26,7 @@ func NewServer(port int) *Server {
 	}
 }
 
-func (s *Server) Start() {
+func (s *server) Start() {
 	http.HandleFunc("/offer", s.handleOffer)
 	log.Printf("[server] setting up localhost:%d/offer\n", s.port)
 
@@ -37,7 +37,7 @@ func (s *Server) Start() {
 	http.ListenAndServe(fmt.Sprintf(":%d", s.port), nil)
 }
 
-func (s *Server) handleOffer(w http.ResponseWriter, req *http.Request) {
+func (s *server) handleOffer(w http.ResponseWriter, req *http.Request) {
 	var offer common.Offer
 	err := json.NewDecoder(req.Body).Decode(&offer)
 	if err != nil {
@@ -66,7 +66,8 @@ func (s *Server) handleOffer(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
-func (s *Server) establishConnection(offer *common.Offer, fout *fanout) (*common.Answer, error) {
+func (s *server) establishConnection(offer *common.Offer, fout *fanout) (*common.Answer, error) {
+	// TODO: uuid
 	streamID := common.RandString(10)
 	answerChan := make(chan *webrtc.SessionDescription)
 	errorChan := make(chan error)
@@ -207,6 +208,7 @@ func (s *Server) establishConnection(offer *common.Offer, fout *fanout) (*common
 	}
 }
 
-func (s *Server) handleCandidate(w http.ResponseWriter, req *http.Request) {
+func (s *server) handleCandidate(w http.ResponseWriter, req *http.Request) {
+	// tbd
 	fmt.Fprintf(w, "Thanks for the candidate\n")
 }
