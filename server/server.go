@@ -3,183 +3,210 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 
 	"github.com/epes/webrtc-server-client/common"
-	"github.com/pion/webrtc"
+	webrtc "github.com/pion/webrtc/v2"
 )
 
-type fanout struct {
-	connectChan    chan chan string
-	disconnectChan chan chan string
-	messageChan    chan string
+type Server struct {
+	candidates  map[string]chan *webrtc.ICECandidate
+	connections map[string]*webrtc.PeerConnection
+	fanouts     map[string]*fanout
+	port        int
 }
 
-func Init(port int) {
-	f := &fanout{
-		connectChan:    make(chan chan string),
-		disconnectChan: make(chan chan string),
-		messageChan:    make(chan string),
-	}
-	go f.begin()
-
-	http.HandleFunc("/offer", getHandleOffer(f))
-	fmt.Printf("[server] setting up localhost:%d/offer\n", port)
-	http.HandleFunc("/candidate", handleCandidate)
-	fmt.Printf("[server] setting up localhost:%d/candidate\n", port)
-	http.ListenAndServe(fmt.Sprintf(":%d", port), nil)
-	fmt.Printf("[server] Listening on localhost:%d\n", port)
-}
-
-func (f *fanout) begin() {
-	clientSet := make(map[chan string]struct{})
-
-	for {
-		select {
-		case client := <-f.connectChan:
-			clientSet[client] = struct{}{}
-		case client := <-f.disconnectChan:
-			delete(clientSet, client)
-		case message := <-f.messageChan:
-			for client := range clientSet {
-				fmt.Printf("[server] sending message: %s\n", message)
-				client <- message
-			}
-		}
+func NewServer(port int) *Server {
+	return &Server{
+		candidates:  make(map[string]chan *webrtc.ICECandidate),
+		connections: make(map[string]*webrtc.PeerConnection),
+		fanouts:     make(map[string]*fanout),
+		port:        port,
 	}
 }
 
-func getHandleOffer(fout *fanout) func(http.ResponseWriter, *http.Request) {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var offer common.Offer
-		err := json.NewDecoder(r.Body).Decode(&offer)
-		if err != nil {
-			panic(err)
-		}
+func (s *Server) Start() {
+	http.HandleFunc("/offer", s.handleOffer)
+	log.Printf("[server] setting up localhost:%d/offer\n", s.port)
 
-		ansChan := make(chan webrtc.SessionDescription)
-		errChan := make(chan error)
-		closeChan := make(chan bool)
+	http.HandleFunc("/candidate", s.handleCandidate)
+	log.Printf("[server] setting up locahost:%d/candidate\n", s.port)
 
-		go establishConnection(offer, fout, ansChan, errChan, closeChan)
-
-		select {
-		case err := <-errChan:
-			panic(err)
-		case answer := <-ansChan:
-			err = json.NewEncoder(w).Encode(common.Answer{SDP: answer})
-		}
-	}
+	log.Printf("[server] Listening on localhost:%d\n", s.port)
+	http.ListenAndServe(fmt.Sprintf(":%d", s.port), nil)
 }
 
-func establishConnection(
-	offer common.Offer,
-	fout *fanout,
-	ansChan chan<- webrtc.SessionDescription,
-	errChan chan<- error,
-	closeChan chan bool,
-) {
-	messageChan := make(chan string)
-
-	defer func() {
-		// if it never connected, nothing will happen because
-		// deleting a key that doesn't exist in a map is noop
-		fout.disconnectChan <- messageChan
-	}()
-
-	config := webrtc.Configuration{
-		ICEServers: []webrtc.ICEServer{
-			{
-				URLs: []string{"stun:stun.l.google.com:19302"},
-			},
-		},
-	}
-
-	peerConnection, err := webrtc.NewPeerConnection(config)
+func (s *Server) handleOffer(w http.ResponseWriter, req *http.Request) {
+	var offer common.Offer
+	err := json.NewDecoder(req.Body).Decode(&offer)
 	if err != nil {
-		errChan <- err
-		return
+		log.Fatalln(err)
 	}
 
-	peerConnection.OnICEConnectionStateChange(func(connectionState webrtc.ICEConnectionState) {
-		fmt.Printf("[server] ICE Connection State has changed: %s\n", connectionState.String())
+	var fout *fanout
+	// check if there is a fanout assigned to the group
+	fout, ok := s.fanouts[offer.Group]
+	// if there is not, create one and assign it
+	if !ok {
+		fout = newFanout(make(chan string), make(chan chan string), make(chan chan string))
+		go fout.begin()
 
-		switch state := connectionState.String(); state {
-		case "connected":
-			fmt.Printf("[server] connecting %s to the fanout\n", offer.ID)
-			fout.connectChan <- messageChan
-		case "disconnected":
-			fmt.Printf("[server] disconnecting %s from the fanout\n", offer.ID)
-			fout.disconnectChan <- messageChan
-		}
-	})
+		s.fanouts[offer.Group] = fout
+	}
 
-	peerConnection.OnICECandidate(func(candidate *webrtc.ICECandidate) {
-		if candidate != nil {
-			fmt.Printf("[server] ICE Candidate: %s\n", candidate.Typ)
-		}
-	})
+	answer, err := s.establishConnection(&offer, fout)
+	if err != nil {
+		log.Fatalln(err)
+	}
 
-	peerConnection.OnDataChannel(func(d *webrtc.DataChannel) {
-		fmt.Printf("[server] new data channel %s\n", d.Label())
+	err = json.NewEncoder(w).Encode(*answer)
+	if err != nil {
+		log.Fatalln(err)
+	}
+}
 
-		d.OnOpen(func() {
-			fmt.Printf("[server] data channel '%s' open\n", d.Label())
-			fout.connectChan <- messageChan
-		})
+func (s *Server) establishConnection(offer *common.Offer, fout *fanout) (*common.Answer, error) {
+	streamID := common.RandString(10)
+	answerChan := make(chan *webrtc.SessionDescription)
+	errorChan := make(chan error)
+	quit := make(chan struct{})
 
-		d.OnClose(func() {
-			fmt.Printf("[server] data channel '%s' closed\n", d.Label())
-			fout.disconnectChan <- messageChan
-		})
+	go func() {
+		// channel that will forward all messages to the client
+		messageOut := make(chan string)
 
-		d.OnMessage(func(msg webrtc.DataChannelMessage) {
-			fmt.Printf("Message from DataChannel '%s': '%s'\n", d.Label(), string(msg.Data))
-			fout.messageChan <- string(msg.Data)
-		})
+		defer func() {
+			// cleanup
 
-		go func() {
-			for {
-				select {
-				case message := <-messageChan:
-					d.SendText(message)
-				}
-			}
+			// unregister peer connection from list of connections
+			log.Printf("[server] unregistering '%s' connection '%s'", offer.ID, streamID)
+			delete(s.connections, streamID)
+
+			// unsubscribe from fanout messages
+			log.Printf("[server] unsubscribing '%s' from the '%s' group\n", offer.ID, offer.Group)
+			fout.disconnect <- messageOut
 		}()
 
-	})
+		// peer connection config
+		config := webrtc.Configuration{
+			ICEServers: []webrtc.ICEServer{
+				{
+					URLs: []string{"stun:stun.l.google.com:19302"},
+				},
+			},
+		}
 
-	fmt.Println("[server] setting offer to remote description")
-	err = peerConnection.SetRemoteDescription(offer.SDP)
-	if err != nil {
-		errChan <- err
-		return
-	}
+		// channel for registering ICE candidates as they trickle in
+		iceCandidatesChan := make(chan *webrtc.ICECandidate, 32)
 
-	fmt.Println("[server] generating answer")
-	answer, err := peerConnection.CreateAnswer(nil)
-	if err != nil {
-		errChan <- err
-		return
-	}
+		peerConnection, err := webrtc.NewPeerConnection(config)
+		if err != nil {
+			errorChan <- err
+			return
+		}
 
-	fmt.Println("[server] setting answer to local description")
-	err = peerConnection.SetLocalDescription(answer)
-	if err != nil {
-		errChan <- err
-		return
-	}
+		// register this connection under the generated streamID
+		s.connections[streamID] = peerConnection
+		// register the ice candidate channel under the generated streamID
+		s.candidates[streamID] = iceCandidatesChan
 
-	fmt.Println("[server] responding to offer with answer")
-	ansChan <- answer
+		peerConnection.OnICEConnectionStateChange(func(connState webrtc.ICEConnectionState) {
+			state := connState.String()
+
+			log.Printf("[server] Connection state change with '%s': %s\n", offer.ID, state)
+
+			if state == "closed" || state == "disconnected" {
+				// if the connection is closed or disconnected, teardown the goroutine
+				quit <- struct{}{}
+			}
+		})
+
+		peerConnection.OnICECandidate(func(candidate *webrtc.ICECandidate) {
+			if candidate != nil {
+				log.Printf("[server] ICE Candidate: %s\n", candidate)
+				iceCandidatesChan <- candidate
+			}
+		})
+
+		peerConnection.OnICEGatheringStateChange(func(iceState webrtc.ICEGathererState) {
+			state := iceState.String()
+			log.Printf("[server] ICE Gathering state change with '%s': %s'\n", offer.ID, state)
+		})
+
+		peerConnection.OnSignalingStateChange(func(signalState webrtc.SignalingState) {
+			state := signalState.String()
+			log.Printf("[server] Signaling state change with '%s': %s'\n", offer.ID, state)
+		})
+
+		peerConnection.OnDataChannel(func(dc *webrtc.DataChannel) {
+			log.Printf("[server] new data channel %s\n", dc.Label())
+
+			dc.OnOpen(func() {
+				log.Printf("[server] data channel '%s' open\n", dc.Label())
+				log.Printf("[server] subscribing '%s' to the '%s' group\n", offer.ID, offer.Group)
+				fout.connect <- messageOut
+			})
+
+			dc.OnClose(func() {
+				log.Printf("[server] data channel '%s' closed\n", dc.Label())
+				log.Printf("[server] unsubscribing '%s' from the '%s' group\n", offer.ID, offer.Group)
+				fout.disconnect <- messageOut
+			})
+
+			dc.OnMessage(func(msg webrtc.DataChannelMessage) {
+				data := string(msg.Data)
+				log.Printf("[server][%s] %s: %s\n", offer.Group, offer.ID, data)
+				fout.broadcast <- data
+			})
+
+			go func() {
+				for {
+					select {
+					case message := <-messageOut:
+						dc.SendText(message)
+					}
+				}
+			}()
+		})
+
+		log.Printf("[server] setting offer from '%s' to remote description\n", offer.ID)
+		err = peerConnection.SetRemoteDescription(offer.SDP)
+		if err != nil {
+			errorChan <- err
+			return
+		}
+
+		log.Printf("[server] generating answer for '%s'", offer.ID)
+		answer, err := peerConnection.CreateAnswer(nil)
+		if err != nil {
+			errorChan <- err
+			return
+		}
+
+		log.Printf("[server] setting answer for '%s' to local description", offer.ID)
+		err = peerConnection.SetLocalDescription(answer)
+		if err != nil {
+			errorChan <- err
+			return
+		}
+
+		log.Printf("[server] responding to '%s' offer with an answer", offer.ID)
+		answerChan <- &answer
+
+		select {
+		case <-quit:
+		}
+	}()
 
 	select {
-	// anything that closes the connection
-	// should publish to this channel
-	case <-closeChan:
+	case answer := <-answerChan:
+		return &common.Answer{SDP: *answer, StreamID: streamID}, nil
+	case err := <-errorChan:
+		return nil, err
 	}
 }
 
-func handleCandidate(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprintf(w, "Thanks for the candidate!\n")
+func (s *Server) handleCandidate(w http.ResponseWriter, req *http.Request) {
+	fmt.Fprintf(w, "Thanks for the candidate\n")
 }

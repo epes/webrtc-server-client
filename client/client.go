@@ -4,13 +4,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 
 	"github.com/epes/webrtc-server-client/common"
-	"github.com/pion/webrtc"
+	webrtc "github.com/pion/webrtc/v2"
 )
 
-func Init(port int, name string) {
+func Init(port int, name string, group string) {
 	config := webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{
 			{
@@ -30,47 +31,47 @@ func Init(port int, name string) {
 	}
 
 	peerConnection.OnICEConnectionStateChange(func(connectionState webrtc.ICEConnectionState) {
-		fmt.Printf("[%s] ICE Connection State has changed: %s\n", name, connectionState.String())
+		log.Printf("[%s] ICE Connection State has changed: %s\n", name, connectionState.String())
 	})
 
 	peerConnection.OnICECandidate(func(candidate *webrtc.ICECandidate) {
 		if candidate != nil {
-			fmt.Printf("[%s] ICE Candidate: %s\n", name, candidate.Typ)
+			log.Printf("[%s] ICE Candidate: %s\n", name, candidate.Typ)
 		}
 	})
 
 	dataChannel.OnOpen(func() {
-		fmt.Printf("[%s] data channel '%s' open\n", name, dataChannel.Label())
+		log.Printf("[%s] data channel '%s' open\n", name, dataChannel.Label())
 
 		message := "login"
 
-		fmt.Printf("[%s] sending '%s'\n", name, message)
+		log.Printf("[%s] sending '%s'\n", name, message)
 		dataChannel.Send([]byte(message))
 	})
 
 	dataChannel.OnMessage(func(msg webrtc.DataChannelMessage) {
-		fmt.Printf("[%s] received message on channel '%s': %s\n", name, dataChannel.Label(), string(msg.Data))
+		log.Printf("[%s] received message on channel '%s': %s\n", name, dataChannel.Label(), string(msg.Data))
 	})
 
-	fmt.Printf("[%s] generating offer\n", name)
+	log.Printf("[%s] generating offer\n", name)
 	offer, err := peerConnection.CreateOffer(nil)
 	if err != nil {
 		panic(err)
 	}
 
-	fmt.Printf("[%s] setting local description\n", name)
+	log.Printf("[%s] setting local description\n", name)
 	err = peerConnection.SetLocalDescription(offer)
 	if err != nil {
 		panic(err)
 	}
 
-	fmt.Printf("[%s] exchanging SDP\n", name)
-	answer, err := exchangeSDP(common.Offer{ID: name, SDP: offer}, port)
+	log.Printf("[%s] exchanging SDP\n", name)
+	answer, err := exchangeSDP(common.Offer{ID: name, Group: group, SDP: offer}, port)
 	if err != nil {
 		panic(err)
 	}
 
-	fmt.Printf("[%s] setting answer to remote description\n", name)
+	log.Printf("[%s] setting answer to remote description\n", name)
 	err = peerConnection.SetRemoteDescription(answer.SDP)
 	if err != nil {
 		panic(err)
@@ -88,7 +89,7 @@ func exchangeSDP(offer common.Offer, port int) (common.Answer, error) {
 
 	url := fmt.Sprintf("http://localhost:%d/offer", port)
 
-	fmt.Printf("[%s] sending offer to %s\n", offer.ID, url)
+	log.Printf("[%s] sending offer to %s\n", offer.ID, url)
 	resp, err := http.Post(url, "application/json; charset=utf8", buffer)
 	if err != nil {
 		return common.Answer{}, err
@@ -107,7 +108,7 @@ func exchangeSDP(offer common.Offer, port int) (common.Answer, error) {
 		return common.Answer{}, err
 	}
 
-	fmt.Printf("[%s] received answer\n", offer.ID)
+	log.Printf("[%s] received answer with streamID '%s'\n", offer.ID, answer.StreamID)
 
 	return answer, nil
 }

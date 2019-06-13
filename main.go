@@ -2,11 +2,12 @@ package main
 
 import (
 	"flag"
-	"fmt"
+	"log"
 	"math/rand"
 	"time"
 
 	"github.com/epes/webrtc-server-client/client"
+	"github.com/epes/webrtc-server-client/common"
 	"github.com/epes/webrtc-server-client/server"
 )
 
@@ -15,16 +16,17 @@ func main() {
 	port := flag.Int("port", 9090, "Port of the webrtc server")
 	isClient := flag.Bool("c", false, "Is this a client?")
 	isServer := flag.Bool("s", false, "Is this a server?")
-	name := flag.String("name", randString(5), "Name of the client")
+	name := flag.String("n", common.RandString(5), "Name of the client")
+	group := flag.String("g", "example-group", "Group to connect to")
 	flag.Parse()
 
 	if *isClient && *isServer || !*isClient && !*isServer {
-		fmt.Println(fmt.Errorf("define -c or -s to start a client or a server"))
+		log.Fatalln("Define -c for client or -s for server")
 		return
 	}
 
 	if *isClient {
-		c(*port, *name)
+		c(*port, *name, *group)
 	}
 
 	if *isServer {
@@ -33,19 +35,12 @@ func main() {
 }
 
 func s(port int) {
-	fmt.Printf("[server] starting up server on port %d\n", port)
-	server.Init(port)
+	log.Printf("[server] starting up server on port %d\n", port)
+	server := server.NewServer(port)
+	server.Start()
 }
 
-func c(port int, name string) {
-	fmt.Printf("[client] generating client '%s' connecting to port %d\n", name, port)
-	client.Init(port, name)
-}
-
-func randString(length int) string {
-	bytes := make([]byte, length)
-	for i := 0; i < length; i++ {
-		bytes[i] = byte(65 + rand.Intn(26))
-	}
-	return string(bytes)
+func c(port int, name string, group string) {
+	log.Printf("[client] generating client '%s' connecting to group %s on port %d\n", name, group, port)
+	client.Init(port, name, group)
 }
